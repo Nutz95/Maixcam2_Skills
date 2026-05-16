@@ -7,6 +7,7 @@
 import sys
 import os
 import time
+import json
 
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SKILL_DIR)
@@ -14,6 +15,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from python_tools.maix_env import ensure_maix_env
+from python_tools.picoclaw_notify import notify_image
 
 ensure_maix_env()
 
@@ -42,6 +44,23 @@ def capture_photo(path_output="/root/.picoclaw/workspace/capture_photo_2k.jpg"):
         print(f"📁 Fichier : {path_output}")
         print(f"📏 Résolution : 2160x1440")
         print(f"🎨 Qualité : 95%")
+
+        picoclaw_sent = notify_image(path_output, f"2K image captured: {path_output}")
+        if picoclaw_sent:
+            print("[PICOCLAW] Notification sent via picoclaw library")
+        else:
+            print("[PICOCLAW] Library not available or no compatible helper found")
+
+        summary = {
+            "image_file": path_output,
+            "resolution": "2160x1440",
+            "quality": 95,
+            "send_policy": "image_only",
+            "picoclaw_notified": picoclaw_sent,
+        }
+        print(f"IMAGE_FILE: {path_output}")
+        print("SEND_POLICY: image_only")
+        print("PICOCLAW_RESULT_JSON=" + json.dumps(summary, ensure_ascii=False))
         
         return True
         
