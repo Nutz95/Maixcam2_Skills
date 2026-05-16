@@ -64,7 +64,7 @@ def create_app() -> Flask:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    auto_model = os.environ.get("VLM_AUTOLOAD_MODEL", "qwen3vl").strip().lower()
+    auto_model = os.environ.get("VLM_AUTOLOAD_MODEL", "internvl").strip().lower()
     autoload_result: Dict[str, Any] = {
         "enabled": bool(auto_model),
         "model": auto_model,
