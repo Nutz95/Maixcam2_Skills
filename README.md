@@ -82,3 +82,19 @@ Usage:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tests\test_photo2K.ps1 -DeviceHost 10.17.43.1 -User root -Port 22
 ```
+
+### tests/test_personDetect.ps1
+
+Purpose: run the `person-detect` Python script directly on the camera without PicoClaw.
+
+What it does:
+- opens an SSH session
+- changes directory to `"/root/.picoclaw/workspace/"`
+- runs `skills/person-detect/person_detect.py`
+- reads the latest `person_count_*.txt` report and prints detected people count
+
+Usage:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\test_personDetect.ps1 -DeviceHost 10.17.43.1 -User root -Port 22
+```

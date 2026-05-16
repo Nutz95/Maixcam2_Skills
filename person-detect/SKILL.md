@@ -4,7 +4,8 @@
 ## Usage
 
 ```bash
-/root/.picoclaw/workspace/skills/maixcam-runner/run.sh /root/.picoclaw/workspace/skills/person-detect person_detect.py --run
+cd /root/.picoclaw/workspace/skills/person-detect
+/usr/local/bin/python3 person_detect.py
 ```
 
 ## Description
@@ -12,6 +13,8 @@
 Ce skill lance une détection de personne en temps réel et sauvegarde
 automatiquement la première détection positive. Le script s'arrête
 dès qu'une personne est détectée.
+
+Le script initialise automatiquement l'environnement MaixPy via `python_tools/maix_env.py` (équivalent à l'export de `LD_LIBRARY_PATH`).
 
 ## Configuration
 
