@@ -6,39 +6,43 @@ from maix import camera
 
 
 class CameraService:
-    """Handles camera lifecycle and 2K captures."""
+    """Handles camera lifecycle and 2K captures (singleton pattern)."""
 
     def __init__(self, output_dir: str = "/root/.picoclaw/workspace") -> None:
         self._output_dir = output_dir
         self._cam = None
+        self._init_camera()
 
-    def __del__(self) -> None:
+    def _init_camera(self):
+        from maix import camera
         if self._cam is not None:
-            del self._cam
+            return
+        self._cam = camera.Camera()
+        self._cam.set_resolution(width=2160, height=1440)
+        self._cam.skip_frames(30)
 
-    def _ensure_cam(self) -> None:
-        # kept for compatibility; prefer per-capture camera creation
-        return
+    def close(self):
+        # Libère la caméra proprement à l'arrêt du daemon
+        if self._cam is not None:
+            try:
+                # S'il existe une méthode close(), l'utiliser
+                if hasattr(self._cam, "close"):
+                    self._cam.close()
+            except Exception:
+                pass
+            self._cam = None
 
     def capture_2k(self, output_path: Optional[str] = None) -> str:
         os.makedirs(self._output_dir, exist_ok=True)
         if not output_path:
             ts = time.strftime("%Y%m%d_%H%M%S")
-            output_path = os.path.join(self._output_dir, f"vlm_capture_{ts}_2k.jpg")
+            ms = int((time.time() % 1) * 1000)
+            output_path = os.path.join(self._output_dir, f"vlm_capture_{ts}_{ms:03d}_2k.jpg")
 
-        # Create and destroy a camera instance for each capture. This avoids
-        # repeated VI driver re-init issues when the daemon handles multiple
-        # consecutive captures/asks.
-        cam = camera.Camera()
-        try:
-            cam.set_resolution(width=2160, height=1440)
-            cam.skip_frames(30)
-            img = cam.read()
-            img.save(path=output_path, quality=95)
-        finally:
-            try:
-                del cam
-            except Exception:
-                pass
-
+        # Utilise l'instance unique de caméra
+        if self._cam is None:
+            self._init_camera()
+        cam = self._cam
+        img = cam.read()
+        img.save(path=output_path, quality=95)
         return output_path

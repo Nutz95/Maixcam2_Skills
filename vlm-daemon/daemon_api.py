@@ -5,6 +5,8 @@ import os
 import sys
 import threading
 import time
+import signal
+import atexit
 from typing import Any, Dict
 
 from flask import Flask, jsonify, request
@@ -39,6 +41,28 @@ def create_app() -> Flask:
     vlm_manager = VLMManager(catalog)
     camera_service = CameraService(output_dir="/root/.picoclaw/workspace")
     svc = VLMApiService(catalog, vlm_manager, camera_service)
+
+    shutdown_lock = threading.Lock()
+    shutdown_done = {"value": False}
+
+    def _shutdown_cleanup() -> None:
+        with shutdown_lock:
+            if shutdown_done["value"]:
+                return
+            shutdown_done["value"] = True
+        try:
+            camera_service.close()
+        except Exception as e:
+            app.logger.warning("Camera cleanup failed: %s", e)
+
+    def _handle_signal(signum, frame):  # type: ignore[no-untyped-def]
+        app.logger.info("Received signal %s, running daemon cleanup", signum)
+        _shutdown_cleanup()
+        raise SystemExit(0)
+
+    atexit.register(_shutdown_cleanup)
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
 
     auto_model = os.environ.get("VLM_AUTOLOAD_MODEL", "qwen3vl").strip().lower()
     autoload_result: Dict[str, Any] = {
