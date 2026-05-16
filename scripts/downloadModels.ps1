@@ -6,7 +6,9 @@ param(
     [string]$HFEndpoint = "https://hf-mirror.com",
     [string]$ModelName,
     [switch]$AllModels,
-    [switch]$ForceDownload
+    [switch]$ForceDownload,
+    [ValidateRange(1, 5)]
+    [int]$EndpointRetries = 2
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,7 +64,7 @@ function Download-Model {
     $repo = "sipeed/$ModelName"
     $localDir = "/root/models/$ModelName"
 
-    $checkCmd = "find {0} -maxdepth 6 -type f -name 'model.mud' | head -n 1" -f (Escape-ShellArg $localDir)
+    $checkCmd = "if [ -d {0} ]; then find {0} -maxdepth 6 -type f -name 'model.mud' | head -n 1; fi" -f (Escape-ShellArg $localDir)
     $existingModel = ""
     try {
         $existingModel = Invoke-Remote -Command $checkCmd
@@ -87,6 +89,7 @@ import sys
 import threading
 import time
 from huggingface_hub import snapshot_download
+import traceback
 
 repo_id = sys.argv[1]
 local_dir = sys.argv[2]
@@ -143,6 +146,21 @@ def normalize_layout(base_dir):
         print(f"[POST] - {p}", flush=True)
     return candidates[0]
 
+def ensure_runtime_exec(base_dir):
+    patched = []
+    for root, _dirs, files in os.walk(base_dir):
+        for name in files:
+            if name in ("main_ax630c_api", "run_ax_api.sh"):
+                fp = os.path.join(root, name)
+                try:
+                    st = os.stat(fp)
+                    os.chmod(fp, st.st_mode | 0o111)
+                    patched.append(fp)
+                except OSError:
+                    pass
+    for fp in patched:
+        print(f"[POST] chmod +x {fp}", flush=True)
+
 print(f"[START] repo={repo_id}", flush=True)
 print(f"[START] local_dir={local_dir}", flush=True)
 
@@ -162,7 +180,14 @@ try:
     snapshot_download(
         repo_id=repo_id,
         local_dir=local_dir,
+        resume_download=True,
+        max_workers=4,
+        etag_timeout=30,
     )
+except Exception as exc:
+    print(f"[ERROR] {type(exc).__name__}: {exc}", flush=True)
+    traceback.print_exc()
+    raise
 finally:
     stop_evt.set()
     thread.join(timeout=1.0)
@@ -170,6 +195,8 @@ finally:
 resolved = normalize_layout(local_dir)
 if not resolved:
     raise RuntimeError("Download finished but no model.mud was found")
+
+ensure_runtime_exec(local_dir)
 
 print(f"[DONE] model={resolved}", flush=True)
 
@@ -189,15 +216,31 @@ print(f"DONE: {local_dir}")
         $downloadOk = $false
 
         foreach ($ep in $endpoints) {
-            Write-Host "Trying endpoint: $ep"
-            $runCmd = "PYTHONUNBUFFERED=1 HF_ENDPOINT={0} /usr/local/bin/python3 {1} {2} {3}" -f (Escape-ShellArg $ep), (Escape-ShellArg $remoteTempPy), (Escape-ShellArg $repo), (Escape-ShellArg $localDir)
-            & ssh -p $Port -o StrictHostKeyChecking=accept-new "$User@$DeviceHost" $runCmd
-            if ($LASTEXITCODE -eq 0) {
-                $downloadOk = $true
-                break
+            for ($attempt = 1; $attempt -le $EndpointRetries; $attempt++) {
+                Write-Host "Trying endpoint: $ep (attempt $attempt/$EndpointRetries)"
+                $runCmd = "PYTHONUNBUFFERED=1 HF_ENDPOINT={0} /usr/local/bin/python3 {1} {2} {3}" -f (Escape-ShellArg $ep), (Escape-ShellArg $remoteTempPy), (Escape-ShellArg $repo), (Escape-ShellArg $localDir)
+                & ssh -p $Port -o StrictHostKeyChecking=accept-new "$User@$DeviceHost" $runCmd
+                if ($LASTEXITCODE -eq 0) {
+                    $downloadOk = $true
+                    break
+                }
+
+                $diagCmd = "size=`$(du -sh {0} 2>/dev/null | awk '{print `$1}' || echo 0); mud=`$(find {0} -maxdepth 8 -type f -name 'model.mud' | head -n 1); echo partial_size=`$size; echo model_mud=`${mud:-none}" -f (Escape-ShellArg $localDir)
+                try {
+                    $diag = Invoke-Remote -Command $diagCmd
+                    Write-Warning ("Download attempt failed on endpoint: " + $ep + " | " + $diag)
+                }
+                catch {
+                    Write-Warning "Download attempt failed on endpoint: $ep"
+                }
+
+                if ($attempt -lt $EndpointRetries) {
+                    Start-Sleep -Seconds 3
+                }
             }
-            else {
-                Write-Warning "Download attempt failed on endpoint: $ep"
+
+            if ($downloadOk) {
+                break
             }
         }
 
