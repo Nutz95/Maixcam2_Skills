@@ -14,9 +14,11 @@ Interactive and non-interactive downloader for MaixCAM2 models from Hugging Face
 - Download all listed models in sequence
 - Skip re-download when model.mud already exists (default behavior)
 - Optional forced re-download with `-ForceDownload`
+- Configurable retries per endpoint with `-EndpointRetries`
 - Select preferred endpoint: hf-mirror or official Hugging Face
 - Automatic fallback to the other endpoint if the first one fails
 - Auto-install compatible huggingface_hub version on the camera
+- Auto-fix executable bits for runtime launch files (for example `main_ax630c_api`)
 
 ### Usage
 
@@ -42,6 +44,12 @@ Force re-download of one model (ignore existing local model):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\downloadModels.ps1 -DeviceHost 10.17.43.1 -User root -Port 22 -HFEndpoint https://huggingface.co -ModelName "Qwen3-VL-2B-Instruct-GPTQ-Int4-AX630C-P320-CTX448-maixcam2" -ForceDownload
+```
+
+Retry example for unstable links:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\downloadModels.ps1 -DeviceHost 10.17.43.1 -User root -Port 22 -HFEndpoint https://huggingface.co -ModelName "deepseek-r1-distill-qwen-1.5B-maixcam2" -EndpointRetries 3
 ```
 
 ### One command per model

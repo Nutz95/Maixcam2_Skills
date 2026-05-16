@@ -7,6 +7,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$SshOptions = @(
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ConnectTimeout=6",
+    "-o", "ServerAliveInterval=10",
+    "-o", "ServerAliveCountMax=2"
+)
+
+# Keep non-ASCII prompts readable when sent through ssh/python.
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
 function Assert-Command {
     param([Parameter(Mandatory = $true)][string]$Name)
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -22,7 +33,7 @@ function Escape-ShellArg {
 
 function Invoke-Remote {
     param([Parameter(Mandatory = $true)][string]$Command)
-    $output = & ssh -p $Port -o StrictHostKeyChecking=accept-new "$User@$DeviceHost" $Command
+    $output = & ssh -p $Port @SshOptions "$User@$DeviceHost" $Command
     if ($LASTEXITCODE -ne 0) {
         throw "Remote command failed: $Command"
     }
@@ -38,17 +49,31 @@ function Invoke-ApiClient {
     }
 
     $cmd = "cd " + (Escape-ShellArg $RemoteSkillDir) + "; " + ($parts -join " ")
-    $raw = Invoke-Remote -Command $cmd
-    if (-not $raw) {
-        throw "Empty API response"
+    $raw = & ssh -p $Port @SshOptions "$User@$DeviceHost" $cmd 2>&1
+    $exitCode = $LASTEXITCODE
+    $text = ($raw | Out-String).Trim()
+
+    if (-not $text) {
+        throw "Empty API response (exit=$exitCode)"
     }
 
+    $obj = $null
     try {
-        return $raw | ConvertFrom-Json
+        $obj = $text | ConvertFrom-Json
     }
     catch {
-        throw "Invalid JSON response: $raw"
+        if ($exitCode -ne 0) {
+            throw "API client failed (exit=$exitCode): $text"
+        }
+        throw "Invalid JSON response: $text"
     }
+
+    if ($exitCode -ne 0 -or (($obj.PSObject.Properties.Name -contains "ok") -and (-not $obj.ok))) {
+        $err = if ($obj.PSObject.Properties.Name -contains "error") { $obj.error } else { $text }
+        throw "API error: $err"
+    }
+
+    return $obj
 }
 
 function Get-CurrentModelStatus {
@@ -61,22 +86,83 @@ function Get-CurrentModelStatus {
     }
 }
 
+function Get-ModelLoadTimeoutSeconds {
+    param([Parameter(Mandatory = $true)][string]$ModelAlias)
+
+    switch ($ModelAlias.ToLowerInvariant()) {
+        "qwen3vl" { return 240 }
+        "internvl" { return 180 }
+        "smolvlm" { return 90 }
+        default { return 180 }
+    }
+}
+
+function Get-LoadProgressHint {
+    # Read the most recent meaningful loader line from daemon logs.
+    try {
+        $cmd = "cd $(Escape-ShellArg $RemoteSkillDir); if [ -f logs/vlm_daemon.log ]; then tail -n 200 logs/vlm_daemon.log | grep -E 'LLM init start|tokenizer init ok|init [0-9]+ axmodel ok|init post axmodel ok|init vpm axmodel ok|^[[:space:]]*[0-9]+%[[:space:]]*\|' | tail -n 1; fi"
+        $line = Invoke-Remote -Command $cmd
+        return ($line | Out-String).Trim()
+    }
+    catch {
+        return ""
+    }
+}
+
 function Wait-ModelLoaded {
     param(
         [Parameter(Mandatory = $true)][string]$ExpectedAlias,
-        [int]$Retries = 30,
-        [int]$DelaySeconds = 1
+        [int]$TimeoutSeconds = 180,
+        [int]$DelaySeconds = 2
     )
 
-    for ($i = 1; $i -le $Retries; $i++) {
+    $maxIterations = [Math]::Max(1, [int][Math]::Ceiling($TimeoutSeconds / [double]$DelaySeconds))
+    Write-Host "Waiting for model '$ExpectedAlias' to be ready (timeout ${TimeoutSeconds}s)..."
+
+    $lastHint = ""
+    for ($i = 1; $i -le $maxIterations; $i++) {
         $status = Get-CurrentModelStatus
         if ($null -ne $status -and $status.loaded -and $status.model_alias -eq $ExpectedAlias) {
+            Write-Host "Model '$ExpectedAlias' ready."
             return $status
         }
+
+        $elapsed = $i * $DelaySeconds
+        $hint = Get-LoadProgressHint
+        if ($hint -and $hint -ne $lastHint) {
+            Write-Host ("  - loader: " + $hint)
+            $lastHint = $hint
+        }
+
+        if ($null -ne $status -and $status.loaded) {
+            Write-Host ("  - " + $elapsed + "s: currently loaded='" + $status.model_alias + "', waiting='" + $ExpectedAlias + "'")
+        }
+        elseif ($null -ne $status) {
+            Write-Host ("  - " + $elapsed + "s: daemon ready, model not loaded yet")
+        }
+        else {
+            Write-Host ("  - " + $elapsed + "s: daemon/API not reachable yet")
+        }
+
         Start-Sleep -Seconds $DelaySeconds
     }
 
+    Write-Warning "Timeout while waiting for model '$ExpectedAlias'."
+
     return $null
+}
+
+function Show-DaemonLogs {
+    param([int]$Lines = 80)
+
+    try {
+        $cmd = "cd $(Escape-ShellArg $RemoteSkillDir); ./status_daemon.sh; echo '--- daemon log tail ---'; tail -n $Lines logs/vlm_daemon.log"
+        $out = Invoke-Remote -Command $cmd
+        Write-Host $out
+    }
+    catch {
+        Write-Warning "Failed to read daemon logs: $($_.Exception.Message)"
+    }
 }
 
 function Show-Menu {
@@ -132,21 +218,30 @@ while ($true) {
             "3" {
                 $status = Invoke-Remote -Command "cd $(Escape-ShellArg $RemoteSkillDir); ./status_daemon.sh"
                 Write-Host "Daemon shell status: $status"
-                $health = Invoke-ApiClient -Args @("health")
-                Write-Host ("API health: " + ($health | ConvertTo-Json -Depth 8 -Compress))
+                try {
+                    $health = Invoke-ApiClient -Args @("health")
+                    Write-Host ("API health: " + ($health | ConvertTo-Json -Depth 8 -Compress))
+                }
+                catch {
+                    $msg = $_.Exception.Message
+                    Write-Warning ("API health unreachable or invalid response: " + $msg)
+                }
             }
             "4" {
                 $models = Invoke-ApiClient -Args @("models")
                 Write-Host ($models | ConvertTo-Json -Depth 8)
             }
             "5" {
-                $model = Read-Host "Model alias (smolvlm|qwen3vl|internvl)"
+                $model = (Read-Host "Model alias (smolvlm|qwen3vl|internvl)").Trim().ToLowerInvariant()
                 if (-not $model) {
                     Write-Warning "Model alias is required."
                     break
                 }
 
-                $customModelPath = Read-Host "Optional custom model path (leave empty to use default/discovery)"
+                $customModelPath = (Read-Host "Optional custom model path (leave empty to use default/discovery)").Trim()
+                if (-not $customModelPath) {
+                    $customModelPath = $null
+                }
 
                 $loadError = $null
                 try {
@@ -163,12 +258,17 @@ while ($true) {
                     Write-Warning "Load call failed, checking model status..."
                 }
 
-                $loadedStatus = Wait-ModelLoaded -ExpectedAlias $model
+                $timeoutSeconds = Get-ModelLoadTimeoutSeconds -ModelAlias $model
+                $loadedStatus = Wait-ModelLoaded -ExpectedAlias $model -TimeoutSeconds $timeoutSeconds
                 if ($null -eq $loadedStatus) {
                     if ($null -ne $loadError) {
-                        throw "Model load not confirmed for '$model'. Original error: $loadError"
+                        Write-Warning "Model load not confirmed for '$model'. Error: $loadError"
+                        Show-DaemonLogs
+                        break
                     }
-                    throw "Model load not confirmed for '$model' after polling status."
+                    Write-Warning "Model load not confirmed for '$model' after polling status."
+                    Show-DaemonLogs
+                    break
                 }
 
                 Write-Host ("Model loaded: " + ($loadedStatus | ConvertTo-Json -Depth 6 -Compress))
@@ -193,6 +293,9 @@ while ($true) {
 
                 $ask = Invoke-ApiClient -Args @("ask", "--question", $question, "--image-path", $imgPath)
                 Write-Host ($ask | ConvertTo-Json -Depth 10)
+                if (-not $ask.answer -or $ask.answer -eq "[empty model response]") {
+                    Write-Warning "Model returned an empty answer. Try a short ASCII prompt (e.g. 'describe image') and check daemon logs."
+                }
             }
             "8" {
                 Stop-VLMDaemonGracefully
