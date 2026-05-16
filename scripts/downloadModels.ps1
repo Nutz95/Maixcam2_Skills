@@ -36,6 +36,19 @@ function Escape-ShellArg {
     return "'" + $Value.Replace("'", "'\''") + "'"
 }
 
+function Get-RepoCandidates {
+    param([Parameter(Mandatory = $true)][string]$ModelName)
+
+    switch ($ModelName) {
+        "whisper-basic-maixcam2" {
+            return @("sipeed/whisper-base-maixcam2")
+        }
+        default {
+            return @("sipeed/$ModelName")
+        }
+    }
+}
+
 function Invoke-Remote {
     param([Parameter(Mandatory = $true)][string]$Command)
     $output = & ssh -p $Port -o StrictHostKeyChecking=accept-new "$User@$DeviceHost" $Command
@@ -61,7 +74,7 @@ function Ensure-HuggingFaceHub {
 function Download-Model {
     param([Parameter(Mandatory = $true)][string]$ModelName)
 
-    $repo = "sipeed/$ModelName"
+    $repoCandidates = Get-RepoCandidates -ModelName $ModelName
     $localDir = "/root/models/$ModelName"
 
     $checkCmd = "if [ -d {0} ]; then find {0} -maxdepth 6 -type f -name 'model.mud' | head -n 1; fi" -f (Escape-ShellArg $localDir)
@@ -78,7 +91,7 @@ function Download-Model {
         return
     }
 
-    Write-Host "Downloading $repo to $localDir ..."
+    Write-Host "Downloading $($repoCandidates[0]) to $localDir ..."
 
     $localTempPy = Join-Path $env:TEMP "hf_download_model.py"
     $remoteTempPy = "/tmp/hf_download_model.py"
@@ -89,10 +102,15 @@ import sys
 import threading
 import time
 from huggingface_hub import snapshot_download
-import traceback
 
 repo_id = sys.argv[1]
 local_dir = sys.argv[2]
+
+# HF global cache: blobs are content-addressed and truly resumable across attempts
+HF_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+
+def repo_cache_dir(rid):
+    return os.path.join(HF_CACHE, "models--" + rid.replace("/", "--"))
 
 def dir_size_mb(path):
     total = 0
@@ -104,6 +122,7 @@ def dir_size_mb(path):
             except OSError:
                 pass
     return total / (1024 * 1024)
+
 
 def normalize_layout(base_dir):
     expected = os.path.join(base_dir, "model.mud")
@@ -163,38 +182,45 @@ def ensure_runtime_exec(base_dir):
 
 print(f"[START] repo={repo_id}", flush=True)
 print(f"[START] local_dir={local_dir}", flush=True)
+print(f"[START] hf_cache={HF_CACHE}", flush=True)
 
 stop_evt = threading.Event()
 
 def progress_worker():
     started = time.time()
+    cache_repo = repo_cache_dir(repo_id)
     while not stop_evt.wait(15):
-        size = dir_size_mb(local_dir)
+        size = dir_size_mb(cache_repo)
         elapsed = int(time.time() - started)
-        print(f"[PROGRESS] elapsed={elapsed}s size={size:.1f}MB", flush=True)
+        print(f"[PROGRESS] elapsed={elapsed}s cache={size:.1f}MB", flush=True)
 
 thread = threading.Thread(target=progress_worker, daemon=True)
 thread.start()
 
 try:
-    snapshot_download(
+    # Download to HF global cache (blobs are content-addressed and resume properly
+    # even when switching endpoints between attempts)
+    cached_path = snapshot_download(
         repo_id=repo_id,
-        local_dir=local_dir,
-        resume_download=True,
-        max_workers=4,
-        etag_timeout=30,
+        cache_dir=HF_CACHE,
+        max_workers=2,
     )
 except Exception as exc:
     print(f"[ERROR] {type(exc).__name__}: {exc}", flush=True)
-    traceback.print_exc()
-    raise
+    sys.exit(1)
 finally:
     stop_evt.set()
     thread.join(timeout=1.0)
 
+# Copy snapshot (dereferencing symlinks) to expected local_dir
+os.makedirs(local_dir, exist_ok=True)
+print(f"[POST] Copying snapshot to {local_dir}", flush=True)
+shutil.copytree(cached_path, local_dir, symlinks=False, dirs_exist_ok=True)
+
 resolved = normalize_layout(local_dir)
 if not resolved:
-    raise RuntimeError("Download finished but no model.mud was found")
+    print("[ERROR] Download finished but no model.mud was found", flush=True)
+    sys.exit(1)
 
 ensure_runtime_exec(local_dir)
 
@@ -215,32 +241,36 @@ print(f"DONE: {local_dir}")
         $endpoints = @($HFEndpoint, $secondaryEndpoint)
         $downloadOk = $false
 
-        foreach ($ep in $endpoints) {
-            for ($attempt = 1; $attempt -le $EndpointRetries; $attempt++) {
-                Write-Host "Trying endpoint: $ep (attempt $attempt/$EndpointRetries)"
-                $runCmd = "PYTHONUNBUFFERED=1 HF_ENDPOINT={0} /usr/local/bin/python3 {1} {2} {3}" -f (Escape-ShellArg $ep), (Escape-ShellArg $remoteTempPy), (Escape-ShellArg $repo), (Escape-ShellArg $localDir)
-                & ssh -p $Port -o StrictHostKeyChecking=accept-new "$User@$DeviceHost" $runCmd
-                if ($LASTEXITCODE -eq 0) {
-                    $downloadOk = $true
-                    break
+        foreach ($repo in $repoCandidates) {
+            if ($downloadOk) { break }
+
+            foreach ($ep in $endpoints) {
+                for ($attempt = 1; $attempt -le $EndpointRetries; $attempt++) {
+                    Write-Host "Trying repo: $repo"
+                    Write-Host "Trying endpoint: $ep (attempt $attempt/$EndpointRetries)"
+                    $runCmd = "PYTHONUNBUFFERED=1 HF_ENDPOINT={0} /usr/local/bin/python3 {1} {2} {3}" -f (Escape-ShellArg $ep), (Escape-ShellArg $remoteTempPy), (Escape-ShellArg $repo), (Escape-ShellArg $localDir)
+                    & ssh -p $Port -o StrictHostKeyChecking=accept-new "$User@$DeviceHost" $runCmd
+                    if ($LASTEXITCODE -eq 0) {
+                        $downloadOk = $true
+                        break
+                    }
+
+                    $escapedLocalDir = Escape-ShellArg $localDir
+                    $diagCmd = "size=`$(du -sh $escapedLocalDir 2>/dev/null | awk '{print `$1}' || true); mud=`$(find $escapedLocalDir -maxdepth 8 -type f -name 'model.mud' 2>/dev/null | head -n 1); echo partial_size=`${size:-0}; echo model_mud=`${mud:-none}"
+                    try {
+                        $diag = Invoke-Remote -Command $diagCmd
+                        Write-Warning ("Download attempt failed on repo: " + $repo + " endpoint: " + $ep + " | " + $diag)
+                    }
+                    catch {
+                        Write-Warning ("Download attempt failed on repo: " + $repo + " endpoint: " + $ep)
+                    }
+
+                    if ($attempt -lt $EndpointRetries) {
+                        Start-Sleep -Seconds 3
+                    }
                 }
 
-                $diagCmd = "size=`$(du -sh {0} 2>/dev/null | awk '{print `$1}' || echo 0); mud=`$(find {0} -maxdepth 8 -type f -name 'model.mud' | head -n 1); echo partial_size=`$size; echo model_mud=`${mud:-none}" -f (Escape-ShellArg $localDir)
-                try {
-                    $diag = Invoke-Remote -Command $diagCmd
-                    Write-Warning ("Download attempt failed on endpoint: " + $ep + " | " + $diag)
-                }
-                catch {
-                    Write-Warning "Download attempt failed on endpoint: $ep"
-                }
-
-                if ($attempt -lt $EndpointRetries) {
-                    Start-Sleep -Seconds 3
-                }
-            }
-
-            if ($downloadOk) {
-                break
+                if ($downloadOk) { break }
             }
         }
 
