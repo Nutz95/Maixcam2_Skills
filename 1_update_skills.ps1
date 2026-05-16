@@ -6,7 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$excludedDirs = @("tests")
+$excludedDirs = @("tests", "scripts")
 
 function Assert-Command {
     param([Parameter(Mandatory = $true)][string]$Name)
