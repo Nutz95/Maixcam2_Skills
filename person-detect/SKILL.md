@@ -27,7 +27,18 @@ Le script initialise automatiquement l'environnement MaixPy via `python_tools/ma
 
 - Affiche toujours le nombre de personnes détectées (même 0)
 - Sauvegarde l'image annotée seulement si détection positive
-- Envoie l'image si une détection est faite
+- Produit toujours un rapport texte (`person_count_*.txt`)
+- Produit une image annotée seulement si détection positive
+
+## Politique de renvoi
+
+- Si détection: renvoyer le rapport ET l'image annotée.
+- Si aucune détection: renvoyer uniquement le rapport.
+
+Le script expose explicitement en sortie:
+- `REPORT_FILE: <path>`
+- `DETECTION_IMAGE_FILE: <path|NONE>`
+- `SEND_POLICY: report_and_image|report_only`
 
 ## Commandes
 

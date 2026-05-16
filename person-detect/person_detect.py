@@ -5,6 +5,7 @@
 import sys
 import os
 import time
+import json
 
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SKILL_DIR)
@@ -118,3 +119,20 @@ finally:
         print(f"[ENVOI] L'image sauvegardée à : {last_detection_path}")
     else:
         print(f"[ENVOI] Aucun fichier image détecté. Veuillez lire le fichier de rapport : {count_file}")
+
+    # Sortie explicite pour guider PicoClaw/LLM sur les fichiers à renvoyer.
+    print(f"REPORT_FILE: {count_file}")
+    if last_detection_path:
+        print(f"DETECTION_IMAGE_FILE: {last_detection_path}")
+        print("SEND_POLICY: report_and_image")
+    else:
+        print("DETECTION_IMAGE_FILE: NONE")
+        print("SEND_POLICY: report_only")
+
+    summary = {
+        "report_file": count_file,
+        "detection_image_file": last_detection_path if last_detection_path else None,
+        "person_count": person_detection_count,
+        "send_policy": "report_and_image" if last_detection_path else "report_only",
+    }
+    print("PICOCLAW_RESULT_JSON=" + json.dumps(summary, ensure_ascii=False))
