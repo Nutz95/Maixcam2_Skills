@@ -7,6 +7,16 @@
 import sys
 import os
 import time
+
+SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(SKILL_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from python_tools.maix_env import ensure_maix_env
+
+ensure_maix_env()
+
 from maix import camera, image, nn
 
 def capture_photo(path_output="/root/.picoclaw/workspace/capture_photo_2k.jpg"):

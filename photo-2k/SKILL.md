@@ -6,7 +6,7 @@
 Ce skill capture une photo 2K (2160x1440) sur la plateforme courrante.
 
 **Instructions d'utilisation :**
-1. Exécutez le script via le wrapper (`maixcam-runner`).
+1. Exécutez directement le script `capture.py`.
 2. **Après l'exécution réussie du script, l'utilisateur doit utiliser la commande `send_file` pour recevoir le fichier image capturé.**
 
 **✅ Fonctionne parfaitement!** Le script a été testé via connexion SSH et génère correctement des images.
@@ -17,6 +17,15 @@ Ce skill capture une photo 2K (2160x1440) sur la plateforme courrante.
 import sys
 import os
 import time
+
+SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(SKILL_DIR)
+if REPO_ROOT not in sys.path:
+	sys.path.insert(0, REPO_ROOT)
+
+from python_tools.maix_env import ensure_maix_env
+ensure_maix_env()
+
 from maix import camera, image, nn
 
 # Initialiser la caméra
@@ -37,11 +46,16 @@ img.save(path='/chemin/vers/photo.jpg', quality=95)
 
 ## Utilisation
 
-Pour exécuter le script, utilisez le MaixCamRunner :
+Pour exécuter le script, lancez-le directement :
 
 ```bash
-/root/.picoclaw/workspace/skills/maixcam-runner/run.sh /root/.picoclaw/workspace/skills/photo-2k capture.py
+cd /root/.picoclaw/workspace/skills/photo-2k
+/usr/local/bin/python3 capture.py
 ```
+
+Le script configure automatiquement l'environnement MaixPy (équivalent à `LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/opt/lib:/opt/usr/lib:/soc/lib`) avant de charger `maix`.
+
+La fonction est mutualisée dans `/root/.picoclaw/workspace/skills/python_tools/maix_env.py` pour être réutilisable par les autres skills.
 
 ## Fonctionnalités
 
