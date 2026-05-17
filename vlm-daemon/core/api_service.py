@@ -39,6 +39,14 @@ class VLMApiService:
     def unload_model(self) -> Dict:
         return self._vlm_manager.unload_model()
 
+    def shutdown(self) -> Dict:
+        model_status = self._vlm_manager.unload_model()
+        self._camera_service.close()
+        return {
+            "model": model_status,
+            "camera_closed": True,
+        }
+
     def status(self) -> Dict:
         return self._vlm_manager.status()
 

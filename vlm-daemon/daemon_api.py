@@ -39,7 +39,8 @@ def create_app() -> Flask:
 
     catalog = ModelCatalog()
     vlm_manager = VLMManager(catalog)
-    camera_service = CameraService(output_dir="/root/.picoclaw/workspace")
+    capture_dir = os.environ.get("VLM_CAPTURE_DIR", "/root/.picoclaw/workspace/vlm_captures")
+    camera_service = CameraService(output_dir=capture_dir)
     svc = VLMApiService(catalog, vlm_manager, camera_service)
 
     shutdown_lock = threading.Lock()
@@ -51,9 +52,9 @@ def create_app() -> Flask:
                 return
             shutdown_done["value"] = True
         try:
-            camera_service.close()
+            svc.shutdown()
         except Exception as e:
-            app.logger.warning("Camera cleanup failed: %s", e)
+            app.logger.warning("Daemon cleanup failed: %s", e)
 
     def _handle_signal(signum, frame):  # type: ignore[no-untyped-def]
         app.logger.info("Received signal %s, running daemon cleanup", signum)
@@ -128,6 +129,14 @@ def create_app() -> Flask:
     def unload_model():
         status = svc.unload_model()
         return _ok({"message": "model_unloaded", "model": status})
+
+    @app.post("/shutdown")
+    def shutdown_service():
+        try:
+            result = svc.shutdown()
+            return _ok({"message": "shutdown_done", **result})
+        except Exception as e:
+            return _err(str(e))
 
     @app.post("/capture")
     def capture_only():

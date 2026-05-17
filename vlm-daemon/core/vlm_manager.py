@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import gc
 import subprocess
 import urllib.request
 import urllib.error
@@ -132,6 +133,48 @@ class VLMManager:
         content = msg.get("content") or ""
         return content.strip() if isinstance(content, str) else ""
 
+    def _release_model_obj(self, model_obj, alias: Optional[str]) -> None:
+        """Release model using SDK-defined lifecycle calls before dropping reference."""
+        if model_obj is None:
+            return
+
+        # SDK API (maix.nn): cancel -> clear_image -> unload.
+        # Qwen3VL additionally exposes stop_service().
+        try:
+            model_obj.cancel()
+        except Exception:
+            pass
+
+        try:
+            model_obj.clear_image()
+        except Exception:
+            pass
+
+        try:
+            model_obj.unload()
+        except Exception:
+            pass
+
+        if alias == "qwen3vl":
+            try:
+                model_obj.stop_service()
+            except Exception:
+                pass
+
+        try:
+            del model_obj
+        except Exception:
+            pass
+
+        if alias == "qwen3vl":
+            self._stop_qwen3_service_if_running()
+
+        # Promptly reclaim wrappers/FFI handles.
+        try:
+            gc.collect()
+        except Exception:
+            pass
+
     def load_model(self, alias: str, model_path: Optional[str] = None, system_prompt: Optional[str] = None) -> Dict:
         # ── Phase 1: validate path, unload old model, stamp generation. ──────────────────────
         # Lock held only for this fast section (< 0.1 s). No slow work here.
@@ -192,7 +235,7 @@ class VLMManager:
             if self._load_generation != my_generation:
                 # A concurrent unload() or newer load_model() ran while we were in Phase 2.
                 # Discard our instance — the newer operation has already committed its state.
-                del model_obj
+                self._release_model_obj(model_obj, spec.alias)
                 return self.status()
 
             self._model_obj = model_obj
@@ -204,19 +247,25 @@ class VLMManager:
         return self.status()
 
     def unload_model(self) -> Dict:
+        model_obj = None
+        loaded_alias: Optional[str] = None
         with self._lock:
             # Bump generation so any in-flight Phase-2 is_ready() wait discards its result.
             self._load_generation += 1
             self._loading_alias = None
             self._loading_started_at = None
             if self._model_obj is not None:
-                try:
-                    del self._model_obj
-                finally:
-                    self._model_obj = None
-                    self._loaded_spec = None
-                    self._loaded_model_path = None
-            return self.status()
+                model_obj = self._model_obj
+                loaded_alias = self._loaded_spec.alias if self._loaded_spec else None
+                self._model_obj = None
+                self._loaded_spec = None
+                self._loaded_model_path = None
+
+            status = self.status()
+
+        # Release outside lock to keep /health responsive during teardown.
+        self._release_model_obj(model_obj, loaded_alias)
+        return status
 
     def status(self) -> Dict:
         # Use a regular blocking acquire so /health is always responsive.

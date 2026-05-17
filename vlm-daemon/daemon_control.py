@@ -104,7 +104,7 @@ def _kill_pid(pid: int) -> None:
         os.kill(pid, signal.SIGTERM)
     except OSError:
         return
-    for _ in range(5):
+    for _ in range(12):
         if not _pid_alive(pid):
             return
         time.sleep(1)
@@ -114,9 +114,31 @@ def _kill_pid(pid: int) -> None:
         pass
 
 
+def _wait_pid_exit(pid: Optional[int], timeout_s: int = 10) -> bool:
+    if not pid:
+        return True
+    for _ in range(max(1, timeout_s)):
+        if not _pid_alive(pid):
+            return True
+        time.sleep(1)
+    return not _pid_alive(pid)
+
+
+def _request_graceful_shutdown(timeout: int = 10) -> bool:
+    try:
+        resp = http_json("POST", f"http://{HOST}:{PORT}/shutdown", payload={}, timeout=timeout)
+        return bool(resp.get("ok"))
+    except Exception:
+        return False
+
+
 def stop_daemon(quiet: bool = False) -> int:
     pid = _read_pid_file()
     orphans = _find_orphan_pids()
+
+    graceful_done = _request_graceful_shutdown(timeout=10)
+    if graceful_done:
+        _wait_pid_exit(pid, timeout_s=10)
 
     if pid is None and not os.path.exists(PID_FILE):
         if orphans:
@@ -142,7 +164,8 @@ def stop_daemon(quiet: bool = False) -> int:
                 print(f"Stopped orphan daemon process(es): {' '.join(str(p) for p in orphans)}")
         return 0
 
-    _kill_pid(pid)
+    if _pid_alive(pid):
+        _kill_pid(pid)
 
     extras: List[int] = []
     for orphan in orphans:
